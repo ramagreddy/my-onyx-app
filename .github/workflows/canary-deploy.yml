@@ -1,0 +1,70 @@
+name: Canary Deployment
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy-canary:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Canary Slot
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: <app-name>
+          slot-name: canary
+          package: .
+
+      - name: Route 5% Traffic to Canary
+        run: |
+          az webapp traffic-routing set \
+            --name <app-name> \
+            --resource-group <rg> \
+            --distribution canary=5
+
+      - name: Wait 10 minutes for monitoring
+        run: sleep 600
+
+      - name: Run Health Check
+        id: healthcheck
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://<app-name>-canary.azurewebsites.net/health)
+
+          if [ "$STATUS" != "200" ]; then
+            echo "Health check failed"
+            exit 1
+          fi
+
+      - name: Promote Canary to Production
+        if: success()
+        run: |
+          az webapp deployment slot swap \
+            --name <app-name> \
+            --resource-group <rg> \
+            --slot canary \
+            --target-slot production
+
+      - name: Reset Traffic Routing
+        if: success()
+        run: |
+          az webapp traffic-routing clear \
+            --name <app-name> \
+            --resource-group <rg>
+
+      - name: Rollback (if failed)
+        if: failure()
+        run: |
+          echo "Rolling back..."
+          az webapp traffic-routing clear \
+            --name <app-name> \
+            --resource-group <rg>
